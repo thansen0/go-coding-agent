@@ -1,24 +1,28 @@
 package main
 
 import (
+	"askthomas/tools"
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
-    "askthomas/tools"
 )
 
-const systemPrompt = `
-You are a coding agent.
+const systemPromptTemplate = `
+You are a coding agent working inside an existing codebase.
+
+Current working directory: %s
 
 You can:
 - read files
 - write files
-- run shell commands
+- run a limited set of Go project commands
 
 When you want to use a tool, respond ONLY with valid JSON in this exact shape:
 {"tool":"tool_name","args":{"key":"value"}}
@@ -26,12 +30,15 @@ When you want to use a tool, respond ONLY with valid JSON in this exact shape:
 Available tools:
 - read_file: {"path":"..."}
 - write_file: {"path":"...","content":"..."}
-- run_command: {"cmd":"..."}
+- run_go_action: {"action":"build|test|format|mod_tidy"}
 
 Rules:
 - Do not wrap the JSON in markdown fences.
 - If the task is complete, respond normally with a short final answer.
 - Prefer small, incremental actions.
+- Start by inspecting the relevant files in the repository before making changes.
+- Implement the user's requested changes in this codebase instead of creating unrelated demo files unless the user explicitly asks for one.
+- Use run_go_action to verify changes when useful.
 `
 
 type Message struct {
@@ -150,12 +157,12 @@ func executeTool(raw string) (string, error) {
 		}
 		return tools.WriteFile(path, content)
 
-	case "run_command":
-		cmd := tc.Args["cmd"]
-		if cmd == "" {
-			return "", errors.New(`missing args.cmd for "run_command"`)
+	case "run_go_action":
+		action := tc.Args["action"]
+		if action == "" {
+			return "", errors.New(`missing args.action for "run_go_action"`)
 		}
-		return tools.RunCommand(cmd)
+		return tools.RunGoAction(action)
 
 	default:
 		return "", fmt.Errorf("unknown tool: %s", tc.Tool)
@@ -168,8 +175,13 @@ func looksLikeToolCall(s string) bool {
 }
 
 func runAgent(userInput string) (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+
 	messages := []Message{
-		{Role: "system", Content: systemPrompt},
+		{Role: "system", Content: fmt.Sprintf(systemPromptTemplate, cwd)},
 		{Role: "user", Content: userInput},
 	}
 
@@ -204,10 +216,47 @@ func runAgent(userInput string) (string, error) {
 	return "max iterations reached", nil
 }
 
+func readTask(args []string) (string, error) {
+	if len(args) > 1 {
+		return strings.Join(args[1:], " "), nil
+	}
+
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return "", err
+	}
+
+	if (info.Mode() & os.ModeCharDevice) == 0 {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return "", err
+		}
+		task := strings.TrimSpace(string(data))
+		if task != "" {
+			return task, nil
+		}
+	}
+
+	fmt.Print("Enter a task for the agent: ")
+	reader := bufio.NewReader(os.Stdin)
+	task, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+
+	task = strings.TrimSpace(task)
+	if task == "" {
+		return "", errors.New("no task provided")
+	}
+
+	return task, nil
+}
+
 func main() {
-	task := "Create a hello.py file that prints hello world, then run it."
-	if len(os.Args) > 1 {
-		task = strings.Join(os.Args[1:], " ")
+	task, err := readTask(os.Args)
+	if err != nil {
+		fmt.Println("Error:", err)
+		os.Exit(1)
 	}
 
 	final, err := runAgent(task)
