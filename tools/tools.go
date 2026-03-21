@@ -3,9 +3,11 @@ package tools
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -20,9 +22,11 @@ var workspaceRoot string
 
 var allowedShellPrograms = map[string]struct{}{
 	"cat":  {},
+	"diff": {},
 	"find": {},
 	"git":  {},
 	"go":   {},
+	"grep": {},
 	"head": {},
 	"ls":   {},
 	"make": {},
@@ -31,12 +35,10 @@ var allowedShellPrograms = map[string]struct{}{
 	"pnpm": {},
 	"pwd":  {},
 	"rg":   {},
-	"grep": {},
 	"sed":  {},
 	"tail": {},
 	"wc":   {},
 	"yarn": {},
-	"vi":   {},
 }
 
 var blockedShellPrograms = map[string]struct{}{
@@ -177,17 +179,204 @@ func ReadFile(path string) (string, error) {
 	return string(data), nil
 }
 
+func ReadFileRange(path string, startLine int, endLine int) (string, error) {
+	if startLine <= 0 || endLine < startLine {
+		return "", errors.New("invalid line range")
+	}
+
+	content, err := ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+
+	lines := strings.Split(content, "\n")
+	if startLine > len(lines) {
+		return "", fmt.Errorf("start_line %d beyond file length %d", startLine, len(lines))
+	}
+	if endLine > len(lines) {
+		endLine = len(lines)
+	}
+
+	var builder strings.Builder
+	for i := startLine; i <= endLine; i++ {
+		builder.WriteString(fmt.Sprintf("%d: %s", i, lines[i-1]))
+		if i != endLine {
+			builder.WriteByte('\n')
+		}
+	}
+	return builder.String(), nil
+}
+
 func WriteFile(path string, content string) (string, error) {
 	resolvedPath, err := ensurePathWithinRoot(path, true)
 	if err != nil {
 		return "", err
 	}
 
-	err = os.WriteFile(resolvedPath, []byte(content), 0o644)
-	if err != nil {
+	if err := os.WriteFile(resolvedPath, []byte(content), 0o644); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("Wrote %d bytes to %s", len(content), resolvedPath), nil
+}
+
+func ApplyPatch(path string, before string, after string) (string, error) {
+	if before == "" {
+		return "", errors.New("before snippet cannot be empty")
+	}
+
+	resolvedPath, err := ensurePathWithinRoot(path, true)
+	if err != nil {
+		return "", err
+	}
+
+	originalBytes, err := os.ReadFile(resolvedPath)
+	if err != nil {
+		return "", err
+	}
+
+	original := string(originalBytes)
+	count := strings.Count(original, before)
+	if count == 0 {
+		return "", errors.New("before snippet not found in file")
+	}
+	if count > 1 {
+		return "", fmt.Errorf("before snippet matched %d locations; refine the snippet", count)
+	}
+
+	updated := strings.Replace(original, before, after, 1)
+	if updated == original {
+		return "", errors.New("patch produced no change")
+	}
+
+	if err := os.WriteFile(resolvedPath, []byte(updated), 0o644); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("Applied patch to %s (%d -> %d bytes)", resolvedPath, len(original), len(updated)), nil
+}
+
+func ListFiles(pattern string, limit int) (string, error) {
+	root, err := ensureWorkspaceRoot()
+	if err != nil {
+		return "", err
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+
+	var files []string
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+
+		if d.IsDir() {
+			base := d.Name()
+			if base == ".git" || base == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		rel = filepath.ToSlash(rel)
+		if pattern != "" && !strings.Contains(rel, pattern) {
+			return nil
+		}
+		files = append(files, rel)
+		if len(files) >= limit {
+			return errLimitReached
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errLimitReached) {
+		return "", err
+	}
+
+	sort.Strings(files)
+	return strings.Join(files, "\n"), nil
+}
+
+var errLimitReached = errors.New("limit reached")
+
+func SearchFiles(query string, glob string, limit int) (string, error) {
+	root, err := ensureWorkspaceRoot()
+	if err != nil {
+		return "", err
+	}
+	if query == "" {
+		return "", errors.New("query cannot be empty")
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	var matches []string
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			base := d.Name()
+			if base == ".git" || base == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if glob != "" {
+			ok, matchErr := filepath.Match(glob, rel)
+			if matchErr != nil {
+				return matchErr
+			}
+			if !ok {
+				ok, matchErr = filepath.Match(glob, filepath.Base(rel))
+				if matchErr != nil {
+					return matchErr
+				}
+			}
+			if !ok {
+				return nil
+			}
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
+			if strings.Contains(line, query) {
+				matches = append(matches, fmt.Sprintf("%s:%d:%s", rel, i+1, line))
+				if len(matches) >= limit {
+					return errLimitReached
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errLimitReached) {
+		return "", err
+	}
+
+	if len(matches) == 0 {
+		return "No matches found.", nil
+	}
+
+	return strings.Join(matches, "\n"), nil
 }
 
 func RunGoAction(action string) (string, error) {
@@ -196,7 +385,13 @@ func RunGoAction(action string) (string, error) {
 		return "", fmt.Errorf("unsupported go action %q", action)
 	}
 
+	root, err := ensureWorkspaceRoot()
+	if err != nil {
+		return "", err
+	}
+
 	c := exec.Command(commandArgs[0], commandArgs[1:]...)
+	c.Dir = root
 	out, err := c.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("command failed: %w\n%s", err, string(out))
@@ -204,7 +399,11 @@ func RunGoAction(action string) (string, error) {
 	return string(out), nil
 }
 
-func RunShell(command string, dir string) (string, error) {
+func RunCommand(command string, dir string, intent string) (string, error) {
+	if intent != "" && intent != "inspection" && intent != "verification" {
+		return "", fmt.Errorf("unsupported intent %q", intent)
+	}
+
 	parts, err := tokenizeCommandLine(command)
 	if err != nil {
 		return "", err
