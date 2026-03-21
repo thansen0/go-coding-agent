@@ -23,6 +23,7 @@ You can:
 - read files
 - write files
 - run a limited set of Go project commands
+- run a limited set of safe shell commands inside the current workspace
 
 When you want to use a tool, respond ONLY with valid JSON in this exact shape:
 {"tool":"tool_name","args":{"key":"value"}}
@@ -31,6 +32,7 @@ Available tools:
 - read_file: {"path":"..."}
 - write_file: {"path":"...","content":"..."}
 - run_go_action: {"action":"build|test|format|mod_tidy"}
+- run_shell: {"command":"...","dir":"optional/subdir"}
 
 Rules:
 - Do not wrap the JSON in markdown fences.
@@ -39,6 +41,7 @@ Rules:
 - Start by inspecting the relevant files in the repository before making changes.
 - Implement the user's requested changes in this codebase instead of creating unrelated demo files unless the user explicitly asks for one.
 - Use run_go_action to verify changes when useful.
+- run_shell is restricted to allowlisted programs, blocks obvious network tools, blocks sudo, and cannot run outside the current workspace.
 `
 
 type Message struct {
@@ -164,6 +167,13 @@ func executeTool(raw string) (string, error) {
 		}
 		return tools.RunGoAction(action)
 
+	case "run_shell":
+		command := tc.Args["command"]
+		if command == "" {
+			return "", errors.New(`missing args.command for "run_shell"`)
+		}
+		return tools.RunShell(command, tc.Args["dir"])
+
 	default:
 		return "", fmt.Errorf("unknown tool: %s", tc.Tool)
 	}
@@ -255,6 +265,17 @@ func readTask(args []string) (string, error) {
 func main() {
 	task, err := readTask(os.Args)
 	if err != nil {
+		fmt.Println("Error:", err)
+		os.Exit(1)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Println("Error:", err)
+		os.Exit(1)
+	}
+
+	if err := tools.SetWorkspaceRoot(cwd); err != nil {
 		fmt.Println("Error:", err)
 		os.Exit(1)
 	}
