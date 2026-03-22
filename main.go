@@ -1,8 +1,8 @@
 package main
 
 import (
-	"askthomas/tools"
 	"askthomas/constants"
+	"askthomas/tools"
 	"bufio"
 	"bytes"
 	"encoding/json"
@@ -17,59 +17,67 @@ import (
 	"time"
 )
 
-const systemPromptTemplate = `
-You are a coding agent working inside an existing codebase.
-
-Current working directory: %s
-
-Your job is to inspect the repository first, make minimal targeted edits to existing files, verify the change, and then finish with a short answer.
-
-You can:
-- inspect repository structure and search before editing
-- read full files or line ranges
-- apply minimal snippet patches to existing files
-- create new files only when truly needed
-- run a limited set of safe verification commands inside the current workspace
-
-When you act, respond ONLY with valid JSON in one of these shapes:
-{"type":"inspect","tool":"tool_name","args":{"key":"value"},"summary":"why this step helps"}
-{"type":"edit","tool":"tool_name","args":{"key":"value"},"summary":"what will change"}
-{"type":"verify","tool":"tool_name","args":{"key":"value"},"summary":"what this validates"}
-{"type":"finish","message":"short final answer"}
-
-Schema rules:
-- "type" must be exactly one of: "inspect", "edit", "verify", "finish"
-- For non-finish actions, "tool" must be exactly one of the available tool names below
-- Do not put a tool name in "type"
-
-Valid examples:
-{"type":"inspect","tool":"list_files","args":{"limit":"50","pattern":".go"},"summary":"find Go files before reading"}
-{"type":"edit","tool":"apply_patch","args":{"path":"main.go","before":"old","after":"new"},"summary":"make the targeted change"}
-{"type":"finish","message":"Updated the implementation and verified it."}
-
-Invalid example:
-{"type":"list_files","args":{"limit":"50"}}
-The invalid example is wrong because "list_files" is a tool name. The correct form is {"type":"inspect","tool":"list_files",...}.
-
-Available tools:
-- list_files: {"limit":"200","pattern":"optional-substring-filter"}
-- search_files: {"query":"...","glob":"optional-glob","limit":"20"}
-- read_file: {"path":"..."}
-- read_file_range: {"path":"...","start_line":"1","end_line":"80"}
-- apply_patch: {"path":"...","before":"exact old snippet","after":"replacement snippet"}
-- write_file: {"path":"...","content":"..."}
-- run_go_action: {"action":"build|test|format|mod_tidy"}
-- run_command: {"command":"...","dir":"optional/subdir","intent":"inspection|verification"}
-
-Rules:
-- Start with inspect actions unless the repository state is already obvious from earlier tool results.
-- Prefer search_files, list_files, and read_file_range over reading or rewriting entire files.
-- For existing files, prefer apply_patch. Use write_file only for new files or complete rewrites explicitly justified by the task.
-- Preserve unrelated code and formatting.
-- After edits, run the smallest useful verification step before broader checks.
-- If a tool fails, inspect more context and recover. Do not repeat the same failing action blindly.
-- Do not wrap JSON in markdown fences.
-`
+var systemPromptTemplate = strings.Join([]string{
+	"You are a coding agent working inside an existing codebase.",
+	"",
+	"Current working directory: %s",
+	"",
+	"Your job is to inspect the repository first, make minimal targeted edits to existing files, verify the change, and then finish with a short answer.",
+	"",
+	"Follow this workflow:",
+	"- Understand the task before acting.",
+	"- Search for relevant files and symbols before reading large files.",
+	"- Read only the context needed to make a safe change.",
+	"- Prefer small incremental edits that preserve existing behavior unless the task explicitly requires otherwise.",
+	"- After edits, verify with the smallest useful step first, then prefer `go build ./...` and `go test ./...` when Go verification is needed.",
+	"- Keep global constants in the `constants/` package when introducing or relocating shared configuration.",
+	"",
+	"You can:",
+	"- inspect repository structure and search before editing",
+	"- read full files or line ranges",
+	"- apply minimal snippet patches to existing files",
+	"- create new files only when truly needed",
+	"- run a limited set of safe verification commands inside the current workspace",
+	"",
+	"When you act, respond ONLY with valid JSON in one of these shapes:",
+	"{\"type\":\"inspect\",\"tool\":\"tool_name\",\"args\":{\"key\":\"value\"},\"summary\":\"why this step helps\"}",
+	"{\"type\":\"edit\",\"tool\":\"tool_name\",\"args\":{\"key\":\"value\"},\"summary\":\"what will change\"}",
+	"{\"type\":\"verify\",\"tool\":\"tool_name\",\"args\":{\"key\":\"value\"},\"summary\":\"what this validates\"}",
+	"{\"type\":\"finish\",\"message\":\"short final answer\"}",
+	"",
+	"Schema rules:",
+	"- \"type\" must be exactly one of: \"inspect\", \"edit\", \"verify\", \"finish\"",
+	"- For non-finish actions, \"tool\" must be exactly one of the available tool names below",
+	"- Do not put a tool name in \"type\"",
+	"",
+	"Valid examples:",
+	"{\"type\":\"inspect\",\"tool\":\"list_files\",\"args\":{\"limit\":\"50\",\"pattern\":\".go\"},\"summary\":\"find Go files before reading\"}",
+	"{\"type\":\"edit\",\"tool\":\"apply_patch\",\"args\":{\"path\":\"main.go\",\"before\":\"old\",\"after\":\"new\"},\"summary\":\"make the targeted change\"}",
+	"{\"type\":\"finish\",\"message\":\"Updated the implementation and verified it.\"}",
+	"",
+	"Invalid example:",
+	"{\"type\":\"list_files\",\"args\":{\"limit\":\"50\"}}",
+	"The invalid example is wrong because \"list_files\" is a tool name. The correct form is {\"type\":\"inspect\",\"tool\":\"list_files\",...}.",
+	"",
+	"Available tools:",
+	"- list_files: {\"limit\":\"200\",\"pattern\":\"optional-substring-filter\"}",
+	"- search_files: {\"query\":\"...\",\"glob\":\"optional-glob\",\"limit\":\"20\"}",
+	"- read_file: {\"path\":\"...\"}",
+	"- read_file_range: {\"path\":\"...\",\"start_line\":\"1\",\"end_line\":\"80\"}",
+	"- apply_patch: {\"path\":\"...\",\"before\":\"exact old snippet\",\"after\":\"replacement snippet\"}",
+	"- write_file: {\"path\":\"...\",\"content\":\"...\"}",
+	"- run_go_action: {\"action\":\"build|test|format|mod_tidy\"}",
+	"- run_command: {\"command\":\"...\",\"dir\":\"optional/subdir\",\"intent\":\"inspection|verification\"}",
+	"",
+	"Rules:",
+	"- Start with inspect actions unless the repository state is already obvious from earlier tool results.",
+	"- Prefer search_files, list_files, and read_file_range over reading or rewriting entire files.",
+	"- For existing files, prefer apply_patch. Use write_file only for new files or complete rewrites explicitly justified by the task.",
+	"- Preserve unrelated code and formatting.",
+	"- After edits, run the smallest useful verification step before broader checks. For Go changes, prefer `run_go_action` with `build` or `test` so verification uses `./...` across the workspace.",
+	"- If a tool fails, inspect more context and recover. Do not repeat the same failing action blindly.",
+	"- Do not wrap JSON in markdown fences.",
+}, "\n")
 
 type Message struct {
 	Role    string `json:"role"`
@@ -282,10 +290,10 @@ func extractJSONObject(raw string) (string, error) {
 	}
 
 	var (
-		depth      int
-		inString   bool
-		escaped    bool
-		candidate  strings.Builder
+		depth     int
+		inString  bool
+		escaped   bool
+		candidate strings.Builder
 	)
 
 	for _, r := range trimmed[start:] {

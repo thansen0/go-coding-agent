@@ -4,6 +4,7 @@ import (
 	"askthomas/tools"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -129,6 +130,21 @@ func TestParseActionReturnsUnexpectedEOFForTruncatedJSON(t *testing.T) {
 	}
 }
 
+func TestSystemPromptTemplateMatchesAgentWorkflow(t *testing.T) {
+	requiredSnippets := []string{
+		"Search for relevant files and symbols before reading large files.",
+		"`go build ./...`",
+		"`go test ./...`",
+		"`constants/` package",
+	}
+
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(systemPromptTemplate, snippet) {
+			t.Fatalf("systemPromptTemplate missing %q", snippet)
+		}
+	}
+}
+
 func TestRunAgentUsesInspectionBeforeEditAndFinishes(t *testing.T) {
 	root := t.TempDir()
 	if err := tools.SetWorkspaceRoot(root); err != nil {
@@ -225,6 +241,23 @@ func TestRunAgentRecoversAfterToolFailure(t *testing.T) {
 	}
 	if final != "Done after recovery." {
 		t.Fatalf("final = %q", final)
+	}
+}
+
+func TestToolToActionTypeCoversSupportedTools(t *testing.T) {
+	expected := map[string]string{
+		"list_files":      "inspect",
+		"search_files":    "inspect",
+		"read_file":       "inspect",
+		"read_file_range": "inspect",
+		"apply_patch":     "edit",
+		"write_file":      "edit",
+		"run_go_action":   "verify",
+		"run_command":     "verify",
+	}
+
+	if !reflect.DeepEqual(toolToActionType, expected) {
+		t.Fatalf("toolToActionType = %#v, want %#v", toolToActionType, expected)
 	}
 }
 

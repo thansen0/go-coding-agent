@@ -12,7 +12,7 @@ import (
 )
 
 var allowedGoActions = map[string][]string{
-	"build":    {"go", "build", "."},
+	"build":    {"go", "build", "./..."},
 	"test":     {"go", "test", "./..."},
 	"format":   {"go", "fmt", "./..."},
 	"mod_tidy": {"go", "mod", "tidy"},
@@ -39,6 +39,8 @@ var allowedShellPrograms = map[string]struct{}{
 	"tail": {},
 	"wc":   {},
 	"yarn": {},
+	"file": {},
+	"identify": {},
 }
 
 var blockedShellPrograms = map[string]struct{}{

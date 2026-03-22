@@ -3,6 +3,7 @@ package tools
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -142,5 +143,18 @@ func TestRunCommandStaysWithinWorkspace(t *testing.T) {
 
 	if _, err := RunCommand("pwd", "../", "inspection"); err == nil {
 		t.Fatal("RunCommand allowed dir outside workspace")
+	}
+}
+
+func TestAllowedGoActionsMatchWorkspaceVerificationPolicy(t *testing.T) {
+	tests := map[string][]string{
+		"build": {"go", "build", "./..."},
+		"test":  {"go", "test", "./..."},
+	}
+
+	for action, want := range tests {
+		if got := allowedGoActions[action]; !reflect.DeepEqual(got, want) {
+			t.Fatalf("allowedGoActions[%q] = %#v, want %#v", action, got, want)
+		}
 	}
 }
